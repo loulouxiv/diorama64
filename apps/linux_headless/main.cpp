@@ -19,6 +19,10 @@
 #include "headless_session.h"
 #include "look.h"
 #include "null_device.h"
+#include "png_write.h"
+#ifdef SM64AR_HAVE_VULKAN
+#include "vk_device.h"
+#endif
 #include "room_light.h"
 #include "wav_io.h"
 extern "C" {
@@ -41,6 +45,10 @@ struct OwnedSarec {
 struct PadStep { uint32_t tick; ar_pad pad; };
 struct Options {
     std::string rom, save, sarec, record, audio_out, camera = "near", level, start;
+    std::string device = "null", out = "local/headless-out", look = "original", pipeline_cache, pipelines;
+    std::vector<uint32_t> png_at;
+    uint32_t msaa = 1;
+    bool validation = false;
     std::vector<std::string> game_args;
     std::vector<PadStep> pad;
     uint32_t frames = 300, fps = 30, w = 1280, h = 720, warmup = 240, stats_every = 0;
@@ -64,6 +72,14 @@ const char *kUsage =
     "  --audio-out FILE.wav  the stereo mix of the frames after warm-up\n"
     "  --camera near|far|top|low|orbit   viewer head pose (default near)\n"
     "  --stereo  --size WxH  views drawn (default one 1280x720 view)\n"
+    "  --device null|vulkan  null: counts draws only; vulkan: draws them (lavapipe or a GPU)\n"
+    "  --png-at F1,F2,...    with --device vulkan, write frame_NNNN.png of these frames to --out DIR\n"
+    "  --out DIR             PNG folder (default local/headless-out)\n"
+    "  --look original|roomlit   Original N64 (default) or the room-lit look (lighting, shadows, toy)\n"
+    "  --msaa 1|2|4          multisampling of the AR layer (default 1, as the macOS harness)\n"
+    "  --validation          Vulkan validation layer; its error count is in AR_VK_SUMMARY\n"
+    "  --pipeline-cache FILE VkPipelineCache loaded and saved there\n"
+    "  --pipelines FILE      pipeline list: warmed before the first frame when it exists, written at the end\n"
     "  --log-hash            AR_TICK after warm-up;  --log-frame-hash: after every frame\n"
     "  --stats-every N       AR_FRAME line (draw counts) every N frames\n"
     "  --story-events        AR_LEVEL / AR_MENU / AR_DIALOG lines when they change\n";
@@ -135,6 +151,34 @@ bool parse(int argc, char **argv, Options &o, std::string &err) {
         else if (a == "--log-frame-hash") o.log_frame_hash = true;
         else if (a == "--story-events") o.story_events = true;
         else if (a == "--no-pad") o.pad_connected = false;
+        else if (a == "--validation") o.validation = true;
+        else if (a == "--device") {
+            if (!(v = val())) return false;
+            o.device = v;
+            if (o.device != "null" && o.device != "vulkan") { err = "bad --device (null or vulkan)"; return false; }
+        }
+        else if (a == "--out") { if (!(v = val())) return false; o.out = v; }
+        else if (a == "--pipeline-cache") { if (!(v = val())) return false; o.pipeline_cache = v; }
+        else if (a == "--pipelines") { if (!(v = val())) return false; o.pipelines = v; }
+        else if (a == "--look") {
+            if (!(v = val())) return false;
+            o.look = v;
+            if (o.look != "original" && o.look != "roomlit") { err = "bad --look (original or roomlit)"; return false; }
+        }
+        else if (a == "--msaa") { if (!u32(&o.msaa)) return false; if (o.msaa != 1 && o.msaa != 2 && o.msaa != 4) { err = "bad --msaa (1, 2 or 4)"; return false; } }
+        else if (a == "--png-at") {
+            if (!(v = val())) return false;
+            std::string list = v;
+            for (size_t at = 0;;) {
+                const size_t end = list.find(',', at);
+                uint32_t f = 0;
+                if (!parse_u32(list.substr(at, end == std::string::npos ? std::string::npos : end - at).c_str(), &f)) { err = "bad --png-at"; return false; }
+                o.png_at.push_back(f);
+                if (end == std::string::npos) break;
+                at = end + 1;
+            }
+            std::sort(o.png_at.begin(), o.png_at.end());
+        }
         else if (a == "--level") {
             if (!(v = val())) return false;
             o.level = v;
@@ -253,11 +297,30 @@ int run(const Options &o) {
     HeadlessPlatform plat;
     plat.set_size(o.w, o.h);
     plat.set_stereo(o.stereo);
-    std::unique_ptr<IRenderDevice> dev = create_null_device();
+    std::unique_ptr<IRenderDevice> dev;
+    if (o.device == "vulkan") {
+#ifdef SM64AR_HAVE_VULKAN
+        VulkanDeviceOptions vo;
+        vo.validation = o.validation;
+        vo.pipeline_cache_path = o.pipeline_cache;
+        std::string why;
+        dev = create_vulkan_device(vo, &why);
+        if (!dev) { std::fprintf(stderr, "error: Vulkan: %s\n", why.c_str()); return 1; }
+#else
+        std::fprintf(stderr, "error: built without the Vulkan backend (apt install libvulkan-dev libshaderc-dev, then rebuild)\n");
+        return 1;
+#endif
+    } else {
+        dev = create_null_device();
+    }
+    if (!o.png_at.empty() && o.device != "vulkan") { std::fprintf(stderr, "error: --png-at needs --device vulkan\n"); return 2; }
+    if (!o.png_at.empty()) std::filesystem::create_directories(o.out, ec);
     HeadlessSession s(ar_adapter_sm64(), plat, *dev);
     s.set_audio_mode(AR_AUDIO_MODE_STEREO);
     s.set_key_light_callback([](void *, int on, const float d[3]) { ar_adapter_sm64_set_key_light(on, d); }, nullptr);
-    LookSettings look; look.roomlit = false; look.msaa = 1;   // Original N64, as the harness defaults
+    LookSettings look;   // the app's room-lit defaults, or Original N64 (the harness default)
+    look.roomlit = o.look == "roomlit";
+    look.msaa = (uint8_t)o.msaa;
     s.set_look(look);
     ar_adapter_sm64_set_normal_flags(look_normal_flags(look));
     std::string err;
@@ -278,6 +341,14 @@ int run(const Options &o) {
         while (next_pad < o.pad.size() && o.pad[next_pad].tick <= t) pad = o.pad[next_pad++].pad;
         plat.set_pad(pad, o.pad_connected);
     };
+    if (!o.pipelines.empty()) {
+        std::ifstream in(o.pipelines, std::ios::binary);
+        if (in) {
+            const std::string list((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const size_t built = dev->warm_pipelines(list, 0);
+            std::printf("AR_WARM built=%zu from=%s\n", built, o.pipelines.c_str());
+        }
+    }
     for (uint32_t i = 0; i < o.warmup; i++) { feed_pad(); s.warmup(1); }
     if (o.log_hash) std::printf("AR_TICK n=%llu hash=0x%016llx\n", (unsigned long long)s.ticks_done(), (unsigned long long)ar_adapter_sm64()->state_hash());
 
@@ -302,7 +373,17 @@ int run(const Options &o) {
         plat.set_head(orbit ? orbit_pose((double)f / o.fps, 1.9f, 1.5f, 12.0) : preset_pose(preset));
         feed_pad();
         if (!s.frame()) { std::fprintf(stderr, "error: frame %u: the platform stopped\n", f); return 1; }
-        const NullDeviceStats ds = null_device_stats(*dev);
+        if (std::binary_search(o.png_at.begin(), o.png_at.end(), f)) {
+            dev->wait_idle();
+            std::vector<uint8_t> px; uint32_t w = 0, h = 0;
+            char name[64]; std::snprintf(name, sizeof name, "/frame_%04u.png", f);
+            if (!s.read_final(px, w, h) || !png_write_rgba(o.out + name, px.data(), w, h)) {
+                std::fprintf(stderr, "error: cannot write %s%s\n", o.out.c_str(), name);
+                return 1;
+            }
+            std::printf("AR_PNG frame=%u size=%ux%u path=%s%s\n", f, w, h, o.out.c_str(), name);
+        }
+        const NullDeviceStats ds = o.device == "null" ? null_device_stats(*dev) : NullDeviceStats{};
         if (o.log_frame_hash)
             std::printf("AR_TICK n=%llu hash=0x%016llx\n", (unsigned long long)s.ticks_done(), (unsigned long long)ar_adapter_sm64()->state_hash());
         if (o.stats_every && f % o.stats_every == 0)
@@ -317,7 +398,22 @@ int run(const Options &o) {
         pull_all(!o.audio_out.empty());
     }
     snapshot_frames = s.frames_with_snapshot();
-    const NullDeviceStats ds = null_device_stats(*dev);
+    const NullDeviceStats ds = o.device == "null" ? null_device_stats(*dev) : NullDeviceStats{};
+#ifdef SM64AR_HAVE_VULKAN
+    if (o.device == "vulkan") {
+        dev->wait_idle();
+        const VulkanDeviceInfo vi = vulkan_device_info(*dev);
+        std::printf("AR_VK_SUMMARY device=\"%s\" pipelines=%llu shaders=%llu compile_ms=%.0f last_draws=%llu last_passes=%llu "
+                    "draw_time_builds=%zu validation_errors=%llu validation_warnings=%llu\n",
+                    vi.name.c_str(), (unsigned long long)vi.pipelines_built, (unsigned long long)vi.shader_modules, vi.compile_ms_total,
+                    (unsigned long long)vi.draws_last_frame, (unsigned long long)vi.render_passes_last_frame, dev->draw_time_builds(),
+                    (unsigned long long)vi.validation_errors, (unsigned long long)vi.validation_warnings);
+    }
+#endif
+    if (!o.pipelines.empty()) {
+        std::ofstream outp(o.pipelines, std::ios::binary | std::ios::trunc);
+        outp << dev->pipeline_list();
+    }
     std::printf("AR_LIGHT %s\n", room_light_line(s.room_light_status()).c_str());
     const uint64_t ticks = s.ticks_done() - o.warmup, want = headless_ticks_expected(o.frames, o.fps);
     std::printf("AR_SUMMARY frames=%u ticks=%llu snapshot_frames=%llu capture_draws=%llu device_frames=%llu passes=%llu draws=%llu "

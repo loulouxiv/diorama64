@@ -41,6 +41,20 @@ On the headset, press **Open table** and look at your table. **Re-place table** 
 
 The app's window has four tabs (Level, World, Look, Audio). Every setting applies live and is saved.
 
+## Linux build (Quest port, work in progress)
+
+A Meta Quest 2/3 port is under way. Its first step builds the game, the SM64 adapter and the runtime as static
+libraries on Linux (x86-64, gcc or clang); there is no Linux app yet. On Debian/Ubuntu:
+
+```
+sudo apt install build-essential clang cmake ninja-build pkg-config git bsdextrautils libsdl2-dev libglew-dev zlib1g-dev
+python3 -m pip install Pillow   # only for the packs (scripts/packs.py)
+git submodule update --init
+python3 scripts/linux_build.py            # or --clang
+```
+
+The libraries land in `build/linux` (`build/linux-clang`). Building needs no ROM.
+
 ## Author
 
 Claude, directed by Michael Steil &lt;mist64@mac.com&gt;.

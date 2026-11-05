@@ -6,7 +6,7 @@ Always run as `python3 -I scripts/packs.py ...` (no sm64ar_common: nothing from 
   python3 -I scripts/packs.py pin-from-sources            # local/packs/SOURCES.md -> local/packs/manifest.json (local only)
   python3 -I scripts/packs.py list                        # the pinned packs and what is prepared
   python3 -I scripts/packs.py fetch ID                    # download (official pin, or your SOURCES.md row) if missing, check the SHA-256, extract safely
-  python3 -I scripts/packs.py prepare ID                  # texture pack: filter, validate, resize (sips), .tex via the harness, verify
+  python3 -I scripts/packs.py prepare ID                  # texture pack: filter, validate, resize (Pillow), .tex via the harness, verify
   python3 -I scripts/packs.py prepare ID [--with-bowser] [--no-mario]   # model pack: curated bins walked, PNGs re-encoded, verify
   python3 -I scripts/packs.py prepare render96-models-balanced   # variant: per-actor mix of two prepared packs by cost, verify
                                                           # (needs local/packs/actor_costs.json: python3 scripts/pack_costs.py)
@@ -291,7 +291,6 @@ def dropped(rel, symbol):
 SRC = ROOT / "build" / "_src" / "sm64"
 HARNESS = ROOT / "build" / "macos" / "harness" / "bin" / "sm64ar_harness"
 ROM = ROOT / "local" / "baserom.us.z64"
-SIPS = "/usr/bin/sips"
 TEX_MAX = 1024
 
 
@@ -380,14 +379,39 @@ def target_size(n64_w, n64_h, png_w, png_h):
     return cap if max(png_w, png_h) > cap else 0
 
 
-def _sips(args, dst):
-    r = subprocess.run([SIPS, *args, "--out", str(dst)], capture_output=True)
-    if r.returncode:
-        raise Refused(f"sips failed: {r.stderr.decode('utf-8', 'replace')[:200]}")
+def _pillow():
+    """Pillow's Image module (pip install Pillow); imported on first use so the other commands run without it."""
+    try:
+        from PIL import Image
+    except ImportError:
+        raise SystemExit("error: packs need Pillow to re-encode PNGs: python3 -m pip install Pillow")
+    # png_info caps PNGs at 4096x4096 before they reach Pillow; refuse anything larger outright (decompression bombs).
+    Image.MAX_IMAGE_PIXELS = 4096 * 4096
+    return Image
+
+
+def _reencode_png(src, dst, cap=0):
+    """src decoded and re-encoded as a fresh PNG at dst (no raw pack byte survives), scaled so its longer side is cap
+    when cap is set (aspect kept, like the former `sips -Z cap`)."""
+    Image = _pillow()
+    try:
+        with Image.open(src) as im:
+            if im.format != "PNG":
+                raise Refused(f"not a PNG ({im.format})")
+            im.load()
+            if im.mode not in ("L", "LA", "RGB", "RGBA"):
+                im = im.convert("RGBA")
+            if cap:
+                w, h = im.size
+                scale = cap / max(w, h)
+                im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.Resampling.LANCZOS)
+            im.save(dst, format="PNG", optimize=False)
+    except (OSError, ValueError, Image.DecompressionBombError) as e:
+        raise Refused(f"PNG re-encode failed: {str(e)[:200]}")
 
 
 def prepare_textures(pid, entry, harness=HARNESS, rom=ROM, src=SRC):
-    """Every kept PNG is re-encoded through sips (resized when over target_size), so no raw pack PNG byte reaches the harness's stb."""
+    """Every kept PNG is re-encoded through Pillow (resized when over target_size), so no raw pack PNG byte reaches the harness's stb."""
     table = builtin_textures(src)
     root = texture_root(PACKS / pid / "extracted")
     png_dir = PACKS / pid / "png" / entry["name"]
@@ -415,7 +439,7 @@ def prepare_textures(pid, entry, harness=HARNESS, rom=ROM, src=SRC):
             w, h, _, _ = png_info(p.read_bytes())
             dst.parent.mkdir(parents=True, exist_ok=True)
             size = target_size(table[rel][1], table[rel][2], w, h)
-            _sips(["-Z", str(size), str(p)] if size else ["-s", "format", "png", str(p)], dst)
+            _reencode_png(p, dst, size)
             png_info(dst.read_bytes())
         except Refused as e:
             rep["refused"].append(f"{rel}: {e}")
@@ -1160,13 +1184,13 @@ def check_bin(data, stem, actors, names=None):
     return info["decoded_mb"]
 
 
-def _sips_png(png, cap):
-    """The PNG re-encoded by sips (resized to cap when larger): the only PNG bytes a staged bin carries."""
+def _reencode_png_bytes(png, cap):
+    """The PNG re-encoded by Pillow (resized to cap when larger): the only PNG bytes a staged bin carries."""
     w, h, _, _ = png_info(png)
     with tempfile.TemporaryDirectory(prefix="sm64ar-png-") as d:
         a, b = pathlib.Path(d) / "a.png", pathlib.Path(d) / "b.png"
         a.write_bytes(png)
-        _sips(["-Z", str(cap), str(a)] if max(w, h) > cap else ["-s", "format", "png", str(a)], b)
+        _reencode_png(a, b, cap if max(w, h) > cap else 0)
         return b.read_bytes()
 
 
@@ -1180,7 +1204,7 @@ def c4_excluded(pid):
 
 def prepare_models(pid, entry, with_bowser=False, no_mario=False):
     """extracted/**/<actor>.bin (curated, built-in) -> inflated, validated, anims dropped, every embedded PNG re-encoded by
-    sips at <= BIN_PNG_MAX -> prepared/<name>/; built-in raw .tex files copied after check_tex. Writes
+    Pillow at <= BIN_PNG_MAX -> prepared/<name>/; built-in raw .tex files copied after check_tex. Writes
     prepared/<name>.expected.json (the staged file names) for verify. Lua and anything else in the pack is never read."""
     names = builtin_names()
     allow = set(CURATED) | (set(BOWSER) if with_bowser else set())
@@ -1213,7 +1237,7 @@ def prepare_models(pid, entry, with_bowser=False, no_mario=False):
         source = p.parent.relative_to(extracted).as_posix()
         rep["found"].setdefault(source, []).append(stem)
         try:
-            data, info = walk_bin(inflate_bin(p.read_bytes()), names, png_cap=BIN_PNG_MAX, resize=_sips_png)
+            data, info = walk_bin(inflate_bin(p.read_bytes()), names, png_cap=BIN_PNG_MAX, resize=_reencode_png_bytes)
             check_bin(data, stem, allow, names)
         except Refused as e:
             rep["refused"].append(f"{stem}: {e}")

@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.28)
-project(sm64_ar C CXX OBJC OBJCXX)
+project(sm64_ar C CXX)
+# Objective-C(++) only for the Apple targets (Metal, ARKit, GameController, AppKit); Linux and Android builds are C/C++.
+if(APPLE)
+  enable_language(OBJC OBJCXX)
+endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(cmake/Toolchain.cmake)
 set(CMAKE_C_STANDARD 11)
@@ -12,6 +16,6 @@ if(SM64AR_VISIONOS)
   # An ImmersiveSpace can only be declared from a SwiftUI App, and CMake builds Swift only with the Xcode generator.
   enable_language(Swift)
   add_subdirectory(apps/visionos)
-else()
+elseif(APPLE)
   add_subdirectory(apps/macos_harness)
 endif()

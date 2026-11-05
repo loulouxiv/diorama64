@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scripts/fetch_lua.py — download the pinned Lua 5.3.5 sources into build/_deps (never committed) and check SHA-256.
 sm64coopdx needs Lua 5.3 but ships only a desktop liblua53.a; we build it from source for macOS and visionOS."""
-import hashlib, io, pathlib, shutil, sys, tarfile, urllib.request
+import hashlib, io, pathlib, shutil, sys, tarfile, time, urllib.error, urllib.request
 from sm64ar_common import ROOT
 
 URL = "https://www.lua.org/ftp/lua-5.3.5.tar.gz"
@@ -39,13 +39,25 @@ def extract(data, dest):
     tmp.rename(dest)
 
 
+def download(url, attempts=4):
+    """The body of url, retried with backoff (2s, 4s, 8s) on network errors."""
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                return r.read()
+        except (urllib.error.URLError, OSError) as e:
+            if i == attempts - 1:
+                raise
+            print(f"download failed ({e}), retrying", file=sys.stderr)
+            time.sleep(2 << i)
+
+
 def main():
     if STAMP.exists() and STAMP.read_text().strip() == SHA256 and (DEST / "src" / "lapi.c").exists():
         print(f"lua 5.3.5 up to date in {DEST}")
         return 0
     print(f"downloading {URL}")
-    with urllib.request.urlopen(URL, timeout=60) as r:
-        data = r.read()
+    data = download(URL)
     verify(data, SHA256)
     extract(data, DEST)
     STAMP.write_text(SHA256 + "\n")

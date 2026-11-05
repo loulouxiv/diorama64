@@ -12,6 +12,13 @@ MIN_XCODE, TESTED_XCODE = 26, "26.3"
 BUILD_FLAGS = ["DISCORD_SDK=0", "COOPNET=0", "UPDATER=0", "USE_APP=0"]
 # Homebrew formulae the build needs (make: GNU make, since upstream's Makefile needs more than macOS's make 3.81).
 FORMULAE = ("cmake", "ninja", "make", "sdl2", "glew")
+IS_MAC = sys.platform == "darwin"
+# Linux: commands and pkg-config modules the upstream desktop build (sm64_oracle.py) and the CMake build need, with the
+# Debian/Ubuntu package that provides each.
+LINUX_TOOLS = {"cmake": "cmake", "ninja": "ninja-build", "make": "make", "cc": "build-essential",
+               "c++": "build-essential", "pkg-config": "pkg-config", "git": "git",
+               "hexdump": "bsdextrautils"}
+LINUX_PKGCONFIG = {"sdl2": "libsdl2-dev", "glew": "libglew-dev", "zlib": "zlib1g-dev"}
 
 
 def _selected_xcode():
@@ -78,6 +85,8 @@ def require_xcode():
 
 def env():
     e = dict(os.environ)
+    if not IS_MAC:
+        return e
     e["DEVELOPER_DIR"] = require_xcode()
     brew = find_brew()
     if brew and str(pathlib.Path(brew).parent) not in e.get("PATH", "").split(":"):
@@ -96,3 +105,21 @@ def missing_formulae(names=FORMULAE, brew=None):
     def listed(*n):
         return subprocess.run([brew, "list", "--versions", *n], capture_output=True).returncode == 0
     return [] if listed(*names) else [n for n in names if not listed(n)]
+
+
+def missing_linux_packages(which=shutil.which):
+    """Debian/Ubuntu packages to install for the Linux build (empty when everything is there)."""
+    pkgs = [pkg for tool, pkg in LINUX_TOOLS.items() if not which(tool)]
+    if which("pkg-config"):
+        pkgs += [pkg for mod, pkg in LINUX_PKGCONFIG.items()
+                 if subprocess.run(["pkg-config", "--exists", mod], capture_output=True).returncode != 0]
+    return list(dict.fromkeys(pkgs))
+
+
+def missing_dependencies():
+    """None when the host has what the sm64 build needs, else an error message saying what to install."""
+    if IS_MAC:
+        missing = missing_formulae()
+        return f"missing Homebrew formulae: {' '.join(missing)} (install them: brew install {' '.join(missing)})" if missing else None
+    missing = missing_linux_packages()
+    return f"missing packages: {' '.join(missing)} (install them: sudo apt install {' '.join(missing)})" if missing else None

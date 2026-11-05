@@ -13,12 +13,14 @@ add_library(ar_render_common STATIC render/common/combiner.cpp render/common/dra
 target_include_directories(ar_render_common PUBLIC render/common)
 target_link_libraries(ar_render_common PUBLIC ar_core)
 
+if(APPLE)
 add_library(ar_render_metal STATIC render/metal/msl_emitter.cpp render/metal/metal_device.mm)
 target_include_directories(ar_render_metal PUBLIC render/metal)
 set_source_files_properties(render/metal/metal_device.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 target_link_libraries(ar_render_metal PUBLIC ar_render_common "-framework Metal" "-framework Foundation")
+endif()
 
-if(NOT SM64AR_VISIONOS)
+if(APPLE AND NOT SM64AR_VISIONOS)
 add_library(ar_png STATIC platform/macos/png_io.mm)
 target_include_directories(ar_png PUBLIC platform/macos)
 target_compile_options(ar_png PRIVATE -fobjc-arc)
@@ -29,16 +31,18 @@ add_library(ar_platform_fake STATIC platform/fake/fake_platform.c)
 target_include_directories(ar_platform_fake PUBLIC platform/fake)
 target_link_libraries(ar_platform_fake PUBLIC ar_core)
 
+if(APPLE)
 set_source_files_properties(platform/apple/gc_pad.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 add_library(ar_gc_pad STATIC platform/apple/gc_pad.mm)
 target_include_directories(ar_gc_pad PUBLIC platform/apple)
 target_link_libraries(ar_gc_pad PUBLIC ar_core "-framework GameController" "-framework Foundation")
+endif()
 
 add_library(ar_cube_adapter STATIC adapters/cube/cube_adapter.c)
 target_include_directories(ar_cube_adapter PUBLIC adapters/cube)
 target_link_libraries(ar_cube_adapter PUBLIC ar_core)
 
-if(NOT SM64AR_VISIONOS)
+if(APPLE AND NOT SM64AR_VISIONOS)
 add_library(ar_harness STATIC platform/macos/free_fly.cpp platform/macos/room.cpp
             platform/macos/harness_platform.mm platform/macos/harness_session.mm)
 target_include_directories(ar_harness PUBLIC platform/macos)

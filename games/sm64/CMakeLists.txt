@@ -22,6 +22,17 @@ if(SM64AR_VISIONOS)
   # OSX_BUILD means desktop macOS (SDL2/GL). Dropped so a desktop-only #ifdef OSX_BUILD path can never switch on for
   # visionOS.
   list(REMOVE_ITEM SM64_DEFINES OSX_BUILD=1)
+elseif(NOT APPLE)
+  # Linux (and later Android): the game runs headless inside the host, like on visionOS: no SDL window, audio or
+  # controller backend (the SDL stub stands in), no curl update checker, no SDL crash handler.
+  list(FILTER SM64_C_SOURCES EXCLUDE REGEX "src/pc/(audio/audio_sdl|controller/controller_sdl|update_checker|crash_handler)\\.c$")
+  set(SM64_SDL sm64_sdl_stub)
+  set(SM64_PLATFORM_DEFINES "")
+  find_package(Threads REQUIRED)
+  set(SM64_PLATFORM_LIBS z Threads::Threads ${CMAKE_DL_LIBS} m)
+  set(SM64_ADAPTER_EXTRA adapter/src/link_stubs_visionos.c adapter/src/sha256_portable.c)
+  # OSX_BUILD selects macOS paths (resources in ../Resources, Mach-O specifics); off everywhere but desktop macOS.
+  list(REMOVE_ITEM SM64_DEFINES OSX_BUILD=1)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
@@ -47,7 +58,7 @@ target_compile_definitions(sm64_upstream_headers INTERFACE ${SM64_DEFINES} _LANG
 target_include_directories(sm64_upstream_headers INTERFACE
   ${SM64_SRC_DIR}/include ${SM64_GEN_DIR} ${SM64_GEN_DIR}/include ${SM64_SRC_DIR}/src ${SM64_SRC_DIR}
   ${SM64_SRC_DIR}/sound ${LUA_SRC_DIR} ${SM64_SRC_DIR}/lib/coopnet/include)
-if(SM64AR_VISIONOS)
+if(SM64AR_VISIONOS OR NOT APPLE)
   target_include_directories(sm64_upstream_headers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/sdl_stub/include)
 endif()
 
@@ -79,7 +90,7 @@ target_compile_options(sm64_adapter PRIVATE -fsigned-char)
 # a plain static link would drop them (no music/textures), so pull in the whole archive.
 target_link_libraries(sm64_adapter PRIVATE sm64_upstream_headers ${SM64_SDL} PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,sm64_game>")
 target_link_libraries(sm64_adapter PUBLIC ar_core sm64_audio_logic)
-if(SM64AR_TESTS AND NOT SM64AR_VISIONOS)
+if(SM64AR_TESTS AND APPLE AND NOT SM64AR_VISIONOS)
   target_compile_definitions(sm64_adapter PRIVATE SM64AR_TEST_SEAMS=1)
 endif()
 

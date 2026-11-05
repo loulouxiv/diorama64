@@ -1,5 +1,16 @@
 #include "sm64_pack_stamp.h"
+#ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
+#else
+/* Same names as CommonCrypto, backed by the portable SHA-256 (Linux, Android). */
+#include "sha256_portable.h"
+#define CC_SHA256_DIGEST_LENGTH SHA256_PORTABLE_DIGEST_LENGTH
+#define CC_SHA256_CTX sha256_portable_ctx
+#define CC_LONG size_t
+#define CC_SHA256_Init sha256_portable_init
+#define CC_SHA256_Update sha256_portable_update
+#define CC_SHA256_Final(out, c) sha256_portable_final((c), (out))
+#endif
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>

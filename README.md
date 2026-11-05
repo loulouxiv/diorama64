@@ -43,17 +43,27 @@ The app's window has four tabs (Level, World, Look, Audio). Every setting applie
 
 ## Linux build (Quest port, work in progress)
 
-A Meta Quest 2/3 port is under way. Its first step builds the game, the SM64 adapter and the runtime as static
-libraries on Linux (x86-64, gcc or clang); there is no Linux app yet. On Debian/Ubuntu:
+A Meta Quest 2/3 port is under way. On Linux (x86-64, gcc or clang) it builds the game, the SM64 adapter and the
+runtime, plus `sm64ar_headless`: the game with no window or GPU (a null renderer counts the draws), for recordings,
+replays and audio dumps. On Debian/Ubuntu:
 
 ```
 sudo apt install build-essential clang cmake ninja-build pkg-config git bsdextrautils libsdl2-dev libglew-dev zlib1g-dev
 python3 -m pip install Pillow   # only for the packs (scripts/packs.py)
 git submodule update --init
-python3 scripts/linux_build.py            # or --clang
+python3 scripts/linux_build.py            # or --clang; output in build/linux (build/linux-clang)
 ```
 
-The libraries land in `build/linux` (`build/linux-clang`). Building needs no ROM.
+Building needs no ROM. Running does: put your US ROM at `local/baserom.us.z64` (`scripts/rom_to_z64.py` converts
+`.v64`/`.n64`). Then:
+
+```
+build/linux/headless/sm64ar_headless --help
+build/linux/headless/sm64ar_headless --frames 300 --audio-out local/out.wav     # 10 s of Bob-omb Battlefield
+build/linux/headless/sm64ar_headless --pad-file apps/linux_headless/walk.pad --record local/walk.sarec
+build/linux/headless/sm64ar_headless --sarec local/walk.sarec                   # replays, checking state hashes
+python3 scripts/headless_check.py         # records, replays and compares (hashes, draw counts, audio)
+```
 
 ## Author
 

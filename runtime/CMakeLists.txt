@@ -27,6 +27,16 @@ target_compile_options(ar_png PRIVATE -fobjc-arc)
 target_link_libraries(ar_png PUBLIC "-framework Foundation" "-framework ImageIO" "-framework CoreGraphics")
 endif()
 
+# Headless: the null render device and a portable platform/session for the Linux harness (any host).
+add_library(ar_render_null STATIC render/null/null_device.cpp)
+target_include_directories(ar_render_null PUBLIC render/null)
+target_link_libraries(ar_render_null PUBLIC ar_render_common)
+# room.cpp and free_fly.cpp are portable C++ (shared with the macOS harness).
+add_library(ar_headless STATIC platform/headless/headless_platform.cpp platform/headless/headless_session.cpp
+            platform/macos/room.cpp platform/macos/free_fly.cpp)
+target_include_directories(ar_headless PUBLIC platform/headless platform/macos)
+target_link_libraries(ar_headless PUBLIC ar_render_common ar_core)
+
 add_library(ar_platform_fake STATIC platform/fake/fake_platform.c)
 target_include_directories(ar_platform_fake PUBLIC platform/fake)
 target_link_libraries(ar_platform_fake PUBLIC ar_core)

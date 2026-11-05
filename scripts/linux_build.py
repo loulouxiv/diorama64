@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """scripts/linux_build.py — the Linux host build (Quest port, phase 0): prepares the patched sm64coopdx tree, fetches
 Lua, builds the upstream desktop game once (generated sources and lang/, mods/, palettes/, dynos/ resources), then
-builds the static libraries (sm64_game, sm64_adapter, ar_core, ...) with CMake + Ninja into build/linux.
-No ROM is needed to build: the game reads its assets from the ROM at run time.
+builds the libraries (sm64_game, sm64_adapter, ar_core, ...) and the headless harness (headless/sm64ar_headless)
+with CMake + Ninja into build/linux. No ROM is needed to build: the game reads its assets from the ROM at run time.
 
   python3 scripts/linux_build.py               # gcc/g++ (or $CC/$CXX)
   python3 scripts/linux_build.py --clang       # clang/clang++, into build/linux-clang
@@ -32,7 +32,7 @@ def main(argv):
         cfg += ["-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"]
     if run(cfg, check=False) or run(["ninja", "-C", out, f"-j{os.cpu_count()}"], check=False):
         return 1
-    print(f"built the Linux libraries in {out}")
+    print(f"built {out / 'headless' / 'sm64ar_headless'}")
     return 0
 
 

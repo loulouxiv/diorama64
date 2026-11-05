@@ -36,6 +36,8 @@ public:
     uint32_t last_overlay_draws() const { return last_overlay_; }
     uint32_t last_vertices() const { return last_verts_; }
     uint64_t capture_draws_total() const { return draws_total_; }
+    uint64_t ao_bakes() const { return renderer_ ? renderer_->ao_bakes() : 0; }
+    uint64_t ao_failures() const { return renderer_ ? renderer_->ao_failures() : 0; }
 private:
     const ar_adapter *adapter_;
     HeadlessPlatform &platform_;

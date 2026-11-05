@@ -24,6 +24,7 @@
 #include "vk_device.h"
 #endif
 #include "room_light.h"
+#include "sm64_launch.h"
 #include "wav_io.h"
 extern "C" {
 #include "ar_adapter_sm64.h"
@@ -35,18 +36,12 @@ extern "C" {
 using namespace ar;
 
 namespace {
-struct OwnedSarec {
-    sarec r{};
-    OwnedSarec() = default;
-    OwnedSarec(const OwnedSarec &) = delete;
-    OwnedSarec &operator=(const OwnedSarec &) = delete;
-    ~OwnedSarec() { sarec_free(&r); }
-};
 struct PadStep { uint32_t tick; ar_pad pad; };
 struct Options {
     std::string rom, save, sarec, record, audio_out, camera = "near", level, start;
     std::string device = "null", out = "local/headless-out", look = "original", pipeline_cache, pipelines;
     std::vector<uint32_t> png_at;
+    std::vector<std::pair<std::string, std::string>> look_set;
     uint32_t msaa = 1;
     bool validation = false;
     std::vector<std::string> game_args;
@@ -76,6 +71,7 @@ const char *kUsage =
     "  --png-at F1,F2,...    with --device vulkan, write frame_NNNN.png of these frames to --out DIR\n"
     "  --out DIR             PNG folder (default local/headless-out)\n"
     "  --look original|roomlit   Original N64 (default) or the room-lit look (lighting, shadows, toy)\n"
+    "  --look-set KEY=VALUE  one Look setting (look.cpp keys: ao=off, shadows=..., toy=off...), after --look\n"
     "  --msaa 1|2|4          multisampling of the AR layer (default 1, as the macOS harness)\n"
     "  --validation          Vulkan validation layer; its error count is in AR_VK_SUMMARY\n"
     "  --pipeline-cache FILE VkPipelineCache loaded and saved there\n"
@@ -165,6 +161,13 @@ bool parse(int argc, char **argv, Options &o, std::string &err) {
             o.look = v;
             if (o.look != "original" && o.look != "roomlit") { err = "bad --look (original or roomlit)"; return false; }
         }
+        else if (a == "--look-set") {
+            if (!(v = val())) return false;
+            const std::string kv = v;
+            const size_t eq = kv.find('=');
+            if (eq == std::string::npos || eq == 0) { err = "bad --look-set (KEY=VALUE)"; return false; }
+            o.look_set.emplace_back(kv.substr(0, eq), kv.substr(eq + 1));
+        }
         else if (a == "--msaa") { if (!u32(&o.msaa)) return false; if (o.msaa != 1 && o.msaa != 2 && o.msaa != 4) { err = "bad --msaa (1, 2 or 4)"; return false; } }
         else if (a == "--png-at") {
             if (!(v = val())) return false;
@@ -233,54 +236,10 @@ bool parse(int argc, char **argv, Options &o, std::string &err) {
     return true;
 }
 
-// Same order and meaning as apps/macos_harness's apply_setup: a replay takes the recording's setup; a recording gets
-// an item for each game setting not at its default.
 bool apply_setup(const Options &o, const sarec &rec, std::string *setup) {
-    std::string serr;
-    const bool replay = !o.sarec.empty();
-    if (!resolve_setup(join_game_args(o.game_args), replay ? rec.setup : "", setup, &serr, replay)) {
-        std::fprintf(stderr, "error: %s\n", serr.c_str());
-        return false;
-    }
-    if (replay && rec.game[0] && std::strcmp(rec.game, ar_adapter_sm64()->name) != 0) {
-        std::fprintf(stderr, "error: the recording is for %s, not %s\n", rec.game, ar_adapter_sm64()->name);
-        return false;
-    }
-    ar_adapter_sm64_reset_game_settings();
-    ar_adapter_sm64_set_pip_sky(1);
-    ar_adapter_sm64_set_title_eyes_active(0);
-    char why[160];
-    if (!ar_adapter_sm64_setup(setup->c_str(), why, sizeof why)) { std::fprintf(stderr, "error: setup: %s\n", why); return false; }
-    ar_adapter_sm64_set_screen_log([](int screen, int story, uint32_t tick) {
-        const char *name = sm64_screen_name(screen);
-        std::printf("AR_SCREEN name=%s story=%d tick=%u\n", name ? name : "?", story, tick);
-    });
-    ar_adapter_sm64_set_dropped_log([](const char *what, const char *why2, uint32_t tick) {
-        std::printf("AR_LEVEL dropped %s: %s tick=%u\n", what, why2, tick);
-    });
-    if (!o.record.empty()) {
-        char items[96];
-        if (sm64_game_setting_items(ar_adapter_sm64_mario_cm(), ar_adapter_sm64_cannon_visible(), ar_adapter_sm64_draw_all_rooms(),
-                                    ar_adapter_sm64_other_room_objects(), items, sizeof items) < 0) {
-            std::fprintf(stderr, "error: the game settings' setup items do not fit\n"); return false;
-        }
-        *setup = setup_with_items(*setup, items);
-        if (setup->size() > SAREC_SETUP_MAX) { std::fprintf(stderr, "error: %s\n", setup_too_long(items).c_str()); return false; }
-    }
-    std::printf("AR_SETUP %s\n", setup->c_str());
-    const bool story = sm64_setup_start(setup->c_str()) == 1;
-    std::printf("AR_STORY start=%s source=%s\n", story ? "story" : "level", replay ? "recording" : "launch");
-    if (story && (replay || !o.record.empty())) {
-        std::error_code ec;
-        const bool empty = !std::filesystem::exists(o.save, ec) || std::filesystem::is_empty(o.save, ec);
-        if (!empty) { std::fprintf(stderr, "error: a story recording or replay needs an empty --save folder (%s)\n", o.save.c_str()); return false; }
-    }
-    const AudioSettings audio = audio_settings_off();
-    ar_adapter_sm64_set_player_focus(audio.player_focus);
-    ar_adapter_sm64_set_object_focus(audio.object_focus);
-    ar_adapter_sm64_set_music_ring(audio.music_ring, audio.ring_radius, audio.ring_rotate);
-    ar_adapter_sm64_set_ring_listener(audio.ring_at_head, audio.ring_focus);
-    return true;
+    LaunchSetup l;
+    l.game_args = o.game_args; l.replay = !o.sarec.empty(); l.record = !o.record.empty(); l.save = o.save;
+    return sm64_apply_setup(l, rec, setup);
 }
 
 int run(const Options &o) {
@@ -321,6 +280,10 @@ int run(const Options &o) {
     LookSettings look;   // the app's room-lit defaults, or Original N64 (the harness default)
     look.roomlit = o.look == "roomlit";
     look.msaa = (uint8_t)o.msaa;
+    for (const auto &kv : o.look_set) {
+        std::string why;
+        if (!look_set(&look, kv.first, kv.second, &why)) { std::fprintf(stderr, "error: --look-set %s: %s\n", kv.first.c_str(), why.c_str()); return 2; }
+    }
     s.set_look(look);
     ar_adapter_sm64_set_normal_flags(look_normal_flags(look));
     std::string err;
@@ -417,10 +380,11 @@ int run(const Options &o) {
     std::printf("AR_LIGHT %s\n", room_light_line(s.room_light_status()).c_str());
     const uint64_t ticks = s.ticks_done() - o.warmup, want = headless_ticks_expected(o.frames, o.fps);
     std::printf("AR_SUMMARY frames=%u ticks=%llu snapshot_frames=%llu capture_draws=%llu device_frames=%llu passes=%llu draws=%llu "
-                "vertices=%llu textures=%u uploads=%llu upload_mb=%.1f shadow_maps=%llu hash=0x%016llx\n",
+                "vertices=%llu textures=%u uploads=%llu upload_mb=%.1f shadow_maps=%llu ao_bakes=%llu ao_failures=%llu hash=0x%016llx\n",
                 o.frames, (unsigned long long)ticks, (unsigned long long)snapshot_frames, (unsigned long long)s.capture_draws_total(),
                 (unsigned long long)ds.frames, (unsigned long long)ds.passes, (unsigned long long)ds.draws, (unsigned long long)ds.vertices,
                 ds.textures, (unsigned long long)ds.texture_uploads, ds.texture_bytes / 1048576.0, (unsigned long long)ds.shadow_maps,
+                (unsigned long long)s.ao_bakes(), (unsigned long long)s.ao_failures(),
                 (unsigned long long)ar_adapter_sm64()->state_hash());
     if (ticks != want) {
         std::fprintf(stderr, "error: %u frame(s) at %u fps ran %llu game tick(s), expected %llu\n", o.frames, o.fps,

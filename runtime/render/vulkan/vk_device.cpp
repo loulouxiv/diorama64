@@ -187,11 +187,9 @@ public:
     bool reuse_water_footprint() override { if (!recording_ || !foot_ || !foot_kept_) return false; foot_valid_ = true; return true; }
     void encode_shadow_map(const ShadowFit &fit, const fc_vertex *verts, uint32_t nv, const DrawPacket *draws, uint32_t nd,
                            const DepthExtras &x) override;
-    bool bake_ao(uint32_t, const AoVolume &, const std::vector<ShadowFit> &, float, const fc_vertex *, uint32_t, const DrawPacket *,
-                 uint32_t, const DepthExtras &) override {
-        if (!ao_warned_) { std::fprintf(stderr, "AR_AO bake failed: not on the Vulkan backend yet\n"); ao_warned_ = true; }
-        return false;
-    }
+    bool bake_ao(uint32_t slot, const AoVolume &vol, const std::vector<ShadowFit> &views, float radius, const fc_vertex *verts,
+                 uint32_t nv, const DrawPacket *draws, uint32_t nd, const DepthExtras &x) override;
+    void prepare_ao() override { ao_pipeline(); }
     void encode_environment_reduce(void *, uint32_t) override { env_error_ = "no_probe"; }
     bool environment_stats(EnvStats *, uint32_t *) const override { return false; }
     const char *environment_error() const override { return env_error_.empty() ? nullptr : env_error_.c_str(); }
@@ -282,8 +280,9 @@ private:
     void flush(Target &t);
     void encode_rec(VkCommandBuffer cb, Target &t, Rec &r);
     void flush_sampling(const ImagePtr &img);
-    void encode_depth_map(Image &map, const float m[16], const fc_vertex *verts, uint32_t nv, const DrawPacket *draws, uint32_t nd,
-                          float slope_bias, bool clamp_depth, const DepthExtras &x);
+    void encode_depth_map(Image &map, VkImageView view, const float m[16], const fc_vertex *verts, uint32_t nv, const DrawPacket *draws,
+                          uint32_t nd, float slope_bias, bool clamp_depth, const DepthExtras &x);
+    bool ao_pipeline();
     ImagePtr texture(uint32_t tex_id);
     ImagePtr make_depth_map(uint32_t size);
     bool read_image(Image &img, VkImageAspectFlags aspect, std::vector<uint8_t> &out, uint32_t level = 0);
@@ -366,7 +365,17 @@ private:
     ShadowFit shadow_fit_{};
     UndersideDesc under_desc_{};
     float foot_window_[4] = {0.f, 0.f, 1.f, 1.f};
-    bool edge_ = false, fine_ = false, ao_warned_ = false;
+    bool edge_ = false, fine_ = false;
+    // AO: depth maps from above (a 2D array), reduced by a compute kernel into a 3D volume per slot
+    static constexpr uint32_t kAoSlots = AoSchedule::kSlots, kAoMapSize = 512, kAoMaxViews = 32;
+    ImagePtr ao_[kAoSlots];
+    AoVolume ao_vol_[kAoSlots] = {};
+    ImagePtr ao_bound_;
+    bool ao_tried_ = false;
+    VkFormat ao_format_ = VK_FORMAT_UNDEFINED;
+    VkDescriptorSetLayout ao_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout ao_pl_ = VK_NULL_HANDLE;
+    VkPipeline ao_pipe_ = VK_NULL_HANDLE;
     TextureFilter filter_ = TextureFilter::smooth;
     std::string env_error_;
     uint32_t passes_ = 0, passes_last_ = 0;
@@ -665,7 +674,8 @@ VulkanDevice::~VulkanDevice() {
     dying_ = true;   // from here on, dropping the last reference to an image destroys it at once
     textures_.clear();
     targets_.clear();
-    for (ImagePtr *p : {&white_, &under_ph_, &shadow_ph_, &ao_ph_, &env_ph_, &shadow_, &under_, &foot_}) p->reset();
+    for (ImagePtr *p : {&white_, &under_ph_, &shadow_ph_, &ao_ph_, &env_ph_, &shadow_, &under_, &foot_, &ao_bound_}) p->reset();
+    for (ImagePtr &p : ao_) p.reset();
     for (Slot &s : slots_) retire(s);
     for (auto &kv : fbs_) vkDestroyFramebuffer(dev_, kv.second, nullptr);
     for (auto &kv : pipes_) if (kv.second.p) vkDestroyPipeline(dev_, kv.second.p, nullptr);
@@ -678,8 +688,9 @@ VulkanDevice::~VulkanDevice() {
     if (depth_rp_) vkDestroyRenderPass(dev_, depth_rp_, nullptr);
     for (auto &kv : samplers_) vkDestroySampler(dev_, kv.second, nullptr);
     for (VkSampler s : {linear_clamp_, compare_, nearest_}) if (s) vkDestroySampler(dev_, s, nullptr);
-    for (VkPipelineLayout l : {main_pl_, depth_pl_, pair_pl_}) if (l) vkDestroyPipelineLayout(dev_, l, nullptr);
-    for (VkDescriptorSetLayout l : {pass_layout_, draw_layout_, depth_layout_, pair_layout_}) if (l) vkDestroyDescriptorSetLayout(dev_, l, nullptr);
+    if (ao_pipe_) vkDestroyPipeline(dev_, ao_pipe_, nullptr);
+    for (VkPipelineLayout l : {main_pl_, depth_pl_, pair_pl_, ao_pl_}) if (l) vkDestroyPipelineLayout(dev_, l, nullptr);
+    for (VkDescriptorSetLayout l : {pass_layout_, draw_layout_, depth_layout_, pair_layout_, ao_layout_}) if (l) vkDestroyDescriptorSetLayout(dev_, l, nullptr);
     if (pcache_) vkDestroyPipelineCache(dev_, pcache_, nullptr);
     if (owns_) {
         vkDestroyDevice(dev_, nullptr);
@@ -936,9 +947,10 @@ VkDescriptorSet VulkanDevice::alloc_set(VkDescriptorSetLayout layout) {
     for (;;) {
         if (s.dpool_next == s.dpools.size()) {
             const VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8192}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384},
-                                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048}};
+                                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048},
+                                                  {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64}};
             VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-            pi.maxSets = 8192; pi.poolSizeCount = 3; pi.pPoolSizes = sizes;
+            pi.maxSets = 8192; pi.poolSizeCount = 4; pi.pPoolSizes = sizes;
             VkDescriptorPool p = VK_NULL_HANDLE;
             if (vkCreateDescriptorPool(dev_, &pi, nullptr, &p) != VK_SUCCESS) return VK_NULL_HANDLE;
             s.dpools.push_back(p);
@@ -1561,6 +1573,7 @@ bool VulkanDevice::wait_pipelines_warmed(double timeout_s) {
 // ---------------------------------------------------------------------------------------------------------- lighting
 void VulkanDevice::set_lighting(const LightingFrame *lf) {
     light_ = LightU{};
+    ao_bound_.reset();
     if (!lf || !lf->on) return;
     for (int k = 0; k < 3; k++) { light_.dir_on[k] = lf->dir[k]; light_.tint_amb[k] = lf->tint[k]; }
     light_.dir_on[3] = 1.f;
@@ -1580,7 +1593,16 @@ void VulkanDevice::set_lighting(const LightingFrame *lf) {
     light_.cast[0] = lf->table_cast;
     light_.relight[0] = lf->relight ? 1.f : 0.f;
     light_.relight[1] = lf->relight_strength;
-    // no AO volume and no probe cube on this backend yet: ao.x and toy.w stay 0
+    ao_bound_.reset();
+    if (lf->ao && lf->ao_ready && lf->ao_slot < kAoSlots && ao_[lf->ao_slot]) {
+        const AoVolume &v = ao_vol_[lf->ao_slot];
+        ao_bound_ = ao_[lf->ao_slot];
+        light_.ao[0] = 1.f;
+        light_.ao[1] = lf->ao_strength;
+        for (int k = 0; k < 3; k++) { light_.ao_min[k] = v.min[k]; light_.ao_inv[k] = 1.f / (float)v.dims[k]; }
+        light_.ao_min[3] = v.voxel;
+    }
+    // no probe cube on this backend yet: toy.w stays 0
     light_.toy[0] = lf->toy ? 1.f : 0.f;
     light_.toy[1] = lf->gloss;
     light_.toy[2] = lf->rim;
@@ -1630,7 +1652,7 @@ void VulkanDevice::encode_pass(uint32_t target, const PassDesc &pass, const View
     r.pass = pass; r.view = view; r.light = light_; r.nv = nv;
     r.shadow = shadow_valid_ ? shadow_ : shadow_ph_;
     r.under = under_valid_ ? under_ : under_ph_;
-    r.ao = ao_ph_;
+    r.ao = ao_bound_ ? ao_bound_ : ao_ph_;
     r.env = env_ph_; r.env_prev = env_ph_;
     r.foot = foot_valid_ ? foot_ : under_ph_;
     r.draws.clear();
@@ -1666,7 +1688,7 @@ void VulkanDevice::flush(Target &t) {
     // everything the passes sample goes to SHADER_READ before the render pass (no barrier inside it)
     for (size_t i = 0; i < n; i++) {
         Rec &r = t.recs[i];
-        for (ImagePtr *p : {&r.shadow, &r.under, &r.foot}) if (*p) transition(cb, **p, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        for (ImagePtr *p : {&r.shadow, &r.under, &r.foot, &r.ao}) if (*p) transition(cb, **p, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (ImagePtr &x : r.tex)
             if (x && x != t.color && x->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) transition(cb, *x, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
@@ -1849,8 +1871,8 @@ ImagePtr VulkanDevice::make_depth_map(uint32_t size) {
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                       VK_IMAGE_ASPECT_DEPTH_BIT, false, false);
 }
-void VulkanDevice::encode_depth_map(Image &map, const float m[16], const fc_vertex *verts, uint32_t nv, const DrawPacket *draws, uint32_t nd,
-                                    float slope_bias, bool clamp_depth, const DepthExtras &x) {
+void VulkanDevice::encode_depth_map(Image &map, VkImageView view, const float m[16], const fc_vertex *verts, uint32_t nv,
+                                    const DrawPacket *draws, uint32_t nd, float slope_bias, bool clamp_depth, const DepthExtras &x) {
     VkCommandBuffer cb = slot().cmd;
     VkBuffer vb = VK_NULL_HANDLE, pb = VK_NULL_HANDLE;
     VkDeviceSize voff = 0, poff = 0;
@@ -1859,7 +1881,7 @@ void VulkanDevice::encode_depth_map(Image &map, const float m[16], const fc_vert
     const bool interp = vb && x.prev_pos && x.interp_alpha < 1.f;
     if (interp) poff = stage(x.prev_pos, (size_t)nv * 12, &pb);
     transition(cb, map, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    VkFramebuffer fb = framebuffer(depth_pass(), {map.view}, map.w, map.h);
+    VkFramebuffer fb = framebuffer(depth_pass(), {view}, map.w, map.h);
     VkClearValue cv{};
     cv.depthStencil = {1.f, 0};
     VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -1921,7 +1943,7 @@ void VulkanDevice::encode_shadow_map(const ShadowFit &fit, const fc_vertex *vert
     if (!shadow_) shadow_ = make_depth_map(kShadowSize);
     if (!shadow_) return;
     flush_sampling(shadow_);
-    encode_depth_map(*shadow_, fit.clip_from_level, verts, nv, draws, nd, 2.f, true, x);
+    encode_depth_map(*shadow_, shadow_->view, fit.clip_from_level, verts, nv, draws, nd, 2.f, true, x);
     shadow_fit_ = fit;
     shadow_valid_ = true;
 }
@@ -1931,7 +1953,7 @@ void VulkanDevice::encode_underside_map(const UndersideDesc &u, const fc_vertex 
     if (!under_) under_ = make_depth_map(kUndersideSize);
     if (!under_) return;
     flush_sampling(under_);
-    encode_depth_map(*under_, u.clip_from_level, verts, nv, draws, nd, 0.f, false, x);
+    encode_depth_map(*under_, under_->view, u.clip_from_level, verts, nv, draws, nd, 0.f, false, x);
     under_desc_ = u;
     under_valid_ = true;
 }
@@ -1941,10 +1963,145 @@ void VulkanDevice::encode_water_footprint(const float window[4], const float cli
     if (!foot_) foot_ = make_depth_map(kFootprintSize);
     if (!foot_) return;
     flush_sampling(foot_);
-    encode_depth_map(*foot_, clip_from_level, verts, nv, draws, nd, 0.f, false, DepthExtras{});
+    encode_depth_map(*foot_, foot_->view, clip_from_level, verts, nv, draws, nd, 0.f, false, DepthExtras{});
     std::memcpy(foot_window_, window, sizeof foot_window_);
     foot_valid_ = true;
     foot_kept_ = true;
+}
+
+// The AO kernel (Metal's ao_fill): a view occludes a voxel when the nearest surface towards the sky lies in front of it by
+// more than a small bias (0.002 of the map's depth) and less than the radius (level units). R8 storage when the device has
+// it, else R32F (same values).
+bool VulkanDevice::ao_pipeline() {
+    if (ao_tried_) return ao_pipe_ != VK_NULL_HANDLE;
+    ao_tried_ = true;
+    for (VkFormat f : {VK_FORMAT_R8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32_SFLOAT}) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(phys_, f, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((fp.optimalTilingFeatures & need) == need) { ao_format_ = f; break; }
+    }
+    if (ao_format_ == VK_FORMAT_UNDEFINED) { std::fprintf(stderr, "AR_AO no storage format for the volume\n"); return false; }
+    const char *q = ao_format_ == VK_FORMAT_R8_UNORM ? "r8" : ao_format_ == VK_FORMAT_R16_SFLOAT ? "r16f" : "r32f";
+    const std::string src = std::string(R"(#version 450
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+layout(set = 0, binding = 0) uniform sampler2DArray maps;
+layout(set = 0, binding = 1, )") + q + R"() uniform writeonly image3D outv;
+layout(set = 0, binding = 2, std430) readonly buffer UV { mat4 uv[]; };
+layout(push_constant, std430) uniform AoU { vec4 min_voxel; uvec4 dims_n; vec4 range; } u;
+void main() {
+    const uvec3 id = gl_GlobalInvocationID;
+    if (any(greaterThanEqual(id, u.dims_n.xyz))) { return; }
+    const vec3 p = u.min_voxel.xyz + vec3(id) * u.min_voxel.w;
+    const vec2 wh = vec2(textureSize(maps, 0).xy);
+    float seen = 0.0;
+    for (uint j = 0u; j < u.dims_n.w; j++) {
+        const vec4 q = uv[j] * vec4(p, 1.0);
+        const ivec2 px = ivec2(clamp(q.xy / q.w, 0.0, 0.9999) * wh);
+        const float per_unit = length(vec3(uv[j][0].z, uv[j][1].z, uv[j][2].z));
+        const float ahead = q.z / q.w - texelFetch(maps, ivec3(px, int(j)), 0).r;
+        seen += (ahead <= 0.002 || ahead >= u.range.x * per_unit) ? 1.0 : 0.0;
+    }
+    imageStore(outv, ivec3(id), vec4(seen / float(u.dims_n.w)));
+}
+)";
+    shaderc_compiler_t c = shaderc_compiler_initialize();
+    shaderc_compile_options_t opt = shaderc_compile_options_initialize();
+    shaderc_compile_options_set_target_env(opt, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_1);
+    shaderc_compilation_result_t r = shaderc_compile_into_spv(c, src.c_str(), src.size(), shaderc_compute_shader, "ao_fill.comp", "main", opt);
+    VkShaderModule mod = VK_NULL_HANDLE;
+    if (shaderc_result_get_compilation_status(r) == shaderc_compilation_status_success) {
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = shaderc_result_get_length(r); mi.pCode = (const uint32_t *)shaderc_result_get_bytes(r);
+        vkCreateShaderModule(dev_, &mi, nullptr, &mod);
+    } else {
+        std::fprintf(stderr, "AR_AO ao_fill shader: %s\n", shaderc_result_get_error_message(r));
+    }
+    shaderc_result_release(r);
+    shaderc_compile_options_release(opt);
+    shaderc_compiler_release(c);
+    if (!mod) return false;
+    VkDescriptorSetLayoutBinding b[3] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+                                         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+                                         {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
+    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    li.bindingCount = 3; li.pBindings = b;
+    vkCreateDescriptorSetLayout(dev_, &li, nullptr, &ao_layout_);
+    VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 48};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1; pli.pSetLayouts = &ao_layout_; pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pr;
+    vkCreatePipelineLayout(dev_, &pli, nullptr, &ao_pl_);
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nullptr};
+    ci.layout = ao_pl_;
+    if (vkCreateComputePipelines(dev_, pcache_, 1, &ci, nullptr, &ao_pipe_) != VK_SUCCESS) ao_pipe_ = VK_NULL_HANDLE;
+    vkDestroyShaderModule(dev_, mod, nullptr);
+    return ao_pipe_ != VK_NULL_HANDLE;
+}
+bool VulkanDevice::bake_ao(uint32_t slot_i, const AoVolume &vol, const std::vector<ShadowFit> &views, float radius, const fc_vertex *verts,
+                           uint32_t nv, const DrawPacket *draws, uint32_t nd, const DepthExtras &x) {
+    const uint32_t n = (uint32_t)std::min<size_t>(views.size(), kAoMaxViews);
+    auto fail = [](const char *why) { std::fprintf(stderr, "AR_AO bake failed: %s\n", why); return false; };
+    if (slot_i >= kAoSlots) return fail("slot");
+    if (!recording_ || n == 0 || !nv) return fail("no frame or nothing to bake");
+    if (!depth_pipelines() || !ao_pipeline()) return fail("no pipeline");
+    ImagePtr maps = make_image(VK_IMAGE_TYPE_2D, VK_FORMAT_D32_SFLOAT, kAoMapSize, kAoMapSize, 1, n, 1, VK_SAMPLE_COUNT_1_BIT,
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, false, false);
+    ImagePtr out = make_image(VK_IMAGE_TYPE_3D, ao_format_, vol.dims[0], vol.dims[1], vol.dims[2], 1, 1, VK_SAMPLE_COUNT_1_BIT,
+                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, false, false);
+    if (!maps || !out) return fail("no memory");
+    // one 2D view per slice to draw into; they go with the maps (after this frame)
+    std::vector<VkImageView> slices(n);
+    for (uint32_t j = 0; j < n; j++) {
+        VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vi.image = maps->image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_D32_SFLOAT;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, j, 1};
+        vkCreateImageView(dev_, &vi, nullptr, &slices[j]);
+    }
+    std::vector<float> uv((size_t)n * 16);
+    for (uint32_t j = 0; j < n; j++) {
+        encode_depth_map(*maps, slices[j], views[j].clip_from_level, verts, nv, draws, nd, 0.f, false, x);
+        uv_from_clip(views[j].clip_from_level, &uv[(size_t)j * 16]);
+    }
+    VkCommandBuffer cb = slot().cmd;
+    transition(cb, *maps, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true);
+    transition(cb, *out, VK_IMAGE_LAYOUT_GENERAL);
+    VkBuffer ub = VK_NULL_HANDLE;
+    const VkDeviceSize uoff = stage(uv.data(), uv.size() * sizeof(float), &ub);
+    VkDescriptorSet set = alloc_set(ao_layout_);
+    if (!set) return fail("no descriptor set");
+    VkDescriptorImageInfo mi{nearest_, maps->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo oi{VK_NULL_HANDLE, out->view, VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorBufferInfo bi{ub, uoff, uv.size() * sizeof(float)};
+    VkWriteDescriptorSet w[3] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    for (int k = 0; k < 3; k++) { w[k].dstSet = set; w[k].dstBinding = (uint32_t)k; w[k].descriptorCount = 1; }
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[0].pImageInfo = &mi;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w[1].pImageInfo = &oi;
+    w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[2].pBufferInfo = &bi;
+    vkUpdateDescriptorSets(dev_, 3, w, 0, nullptr);
+    struct { float min_voxel[4]; uint32_t dims_n[4]; float range[4]; } u{{vol.min[0], vol.min[1], vol.min[2], vol.voxel},
+                                                                         {vol.dims[0], vol.dims[1], vol.dims[2], n}, {radius, 0.f, 0.f, 0.f}};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ao_pipe_);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, ao_pl_, 0, 1, &set, 0, nullptr);
+    vkCmdPushConstants(cb, ao_pl_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof u, &u);
+    vkCmdDispatch(cb, (vol.dims[0] + 3) / 4, (vol.dims[1] + 3) / 4, (vol.dims[2] + 3) / 4);
+    transition(cb, *out, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    slot().garbage.push_back([this, slices, maps]() {   // the slice views, and the framebuffers made of them
+        for (auto it = fbs_.begin(); it != fbs_.end();) {
+            const auto &v = std::get<1>(it->first);
+            if (std::find_first_of(v.begin(), v.end(), slices.begin(), slices.end()) != v.end()) {
+                vkDestroyFramebuffer(dev_, it->second, nullptr);
+                it = fbs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (VkImageView v : slices) vkDestroyImageView(dev_, v, nullptr);
+    });
+    ao_[slot_i] = out;   // the volume it replaces is freed once no recorded pass holds it
+    ao_vol_[slot_i] = vol;
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------- composite and resolve

@@ -43,13 +43,19 @@ The app's window has four tabs (Level, World, Look, Audio). Every setting applie
 
 ## Linux build (Quest port, work in progress)
 
-A Meta Quest 2/3 port is under way. On Linux (x86-64, gcc or clang) it builds the game, the SM64 adapter and the
-runtime, plus `sm64ar_headless`: the game with no window or GPU (a null renderer counts the draws), for recordings,
-replays and audio dumps. On Debian/Ubuntu:
+A Meta Quest 2/3 port is under way. On Linux (x86-64, gcc or clang) it builds the game, the SM64 adapter, the runtime
+and a Vulkan renderer, plus two development harnesses:
+
+- `sm64ar_headless`: the game without a window. `--device null` (default) counts the draws; `--device vulkan` draws them
+  (on any Vulkan GPU, or lavapipe, Mesa's software renderer) and writes PNGs. Recordings, replays, audio dumps.
+- `sm64ar_window`: the diorama in a window, with a free camera, played with a gamepad or the keyboard.
+
+On Debian/Ubuntu:
 
 ```
-sudo apt install build-essential clang cmake ninja-build pkg-config git bsdextrautils libsdl2-dev libglew-dev zlib1g-dev
-python3 -m pip install Pillow   # only for the packs (scripts/packs.py)
+sudo apt install build-essential clang cmake ninja-build pkg-config git bsdextrautils libsdl2-dev libglew-dev zlib1g-dev \
+                 libvulkan-dev mesa-vulkan-drivers libshaderc-dev vulkan-validationlayers
+python3 -m pip install Pillow   # packs (scripts/packs.py) and image comparisons
 git submodule update --init
 python3 scripts/linux_build.py            # or --clang; output in build/linux (build/linux-clang)
 ```
@@ -58,11 +64,14 @@ Building needs no ROM. Running does: put your US ROM at `local/baserom.us.z64` (
 `.v64`/`.n64`). Then:
 
 ```
+build/linux/headless/sm64ar_window --look roomlit --msaa 4          # W/A/S/D/Q/E + right mouse: camera; arrows, X, C, Z, Enter: game
 build/linux/headless/sm64ar_headless --help
 build/linux/headless/sm64ar_headless --frames 300 --audio-out local/out.wav     # 10 s of Bob-omb Battlefield
+build/linux/headless/sm64ar_headless --device vulkan --look roomlit --png-at 0,299 --out local/png
 build/linux/headless/sm64ar_headless --pad-file apps/linux_headless/walk.pad --record local/walk.sarec
 build/linux/headless/sm64ar_headless --sarec local/walk.sarec                   # replays, checking state hashes
 python3 scripts/headless_check.py         # records, replays and compares (hashes, draw counts, audio)
+python3 scripts/compare_images.py A B     # Vulkan PNGs against Metal ones (see the script for the commands)
 ```
 
 ## Author

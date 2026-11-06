@@ -43,7 +43,8 @@ The app's window has four tabs (Level, World, Look, Audio). Every setting applie
 
 ## Linux build (Quest port, work in progress)
 
-A Meta Quest 2/3 port is under way. On Linux (x86-64, gcc or clang) it builds the game, the SM64 adapter, the runtime
+A Meta Quest 2/3 port is under way. Its plan is [docs/PORTAGE_QUEST.md](docs/PORTAGE_QUEST.md) and its progress
+[docs/PORTING_LOG.md](docs/PORTING_LOG.md) (both in French). On Linux (x86-64, gcc or clang) it builds the game, the SM64 adapter, the runtime
 and a Vulkan renderer, plus two development harnesses:
 
 - `sm64ar_headless`: the game without a window. `--device null` (default) counts the draws; `--device vulkan` draws them

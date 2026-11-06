@@ -24,6 +24,7 @@ public:
     void set_time_ns(int64_t t);
     void set_pad(const ar_pad &pad, bool connected);
     void set_preview_test(const std::string &mode);
+    void set_session_state(ar_session_state s);   // default FOCUSED (the Quest app follows the Android lifecycle)
 private:
     static int wait_frame(void *u, ar_frame_info *out);
     static int get_table(void *u, ar_table *out);
@@ -42,5 +43,6 @@ private:
     ar_pad pad_{};
     bool pad_connected_ = true;
     int preview_mode_ = AR_PREVIEW_NONE;
+    ar_session_state state_ = AR_SESSION_FOCUSED;
 };
 }

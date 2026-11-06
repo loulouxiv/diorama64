@@ -1,0 +1,18 @@
+// apps/quest — the Meta Quest 2/3 app (Android). Build it with python3 scripts/quest_build.py (it prepares the game
+// sources first), or ./gradlew assembleDebug from here once they are prepared.
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = 'diorama64-quest'
+include ':app'

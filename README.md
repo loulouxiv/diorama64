@@ -74,6 +74,23 @@ python3 scripts/headless_check.py         # records, replays and compares (hashe
 python3 scripts/compare_images.py A B     # Vulkan PNGs against Metal ones (see the script for the commands)
 ```
 
+## Meta Quest 2 / 3 (work in progress)
+
+The Quest app (`apps/quest`) builds and installs, but shows nothing yet: the game, its sound and the app's lifecycle run;
+the picture (OpenXR) comes next. To try it you need a headset in developer mode (Meta Horizon app on your phone), a USB-C
+cable, the Android SDK with its command-line tools, Java 17+, CMake 3.28+ and ninja:
+
+```
+sdkmanager "ndk;27.3.13750724" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+export ANDROID_HOME=~/Android/Sdk               # where the SDK is
+python3 scripts/quest_build.py                  # apps/quest/app/build/outputs/apk/debug/app-debug.apk (--release: optimised)
+python3 scripts/quest_install.py                # installs it, pushes local/baserom.us.z64 to the headset, starts it
+python3 scripts/quest_logs.py --save local/quest.log   # the app's log (Ctrl-C to stop)
+```
+
+Your ROM goes only to the app's folder on the headset (`/sdcard/Android/data/diorama64.quest/files/`), never into the
+APK. The log reports the OpenXR runtime's extensions, the game's start, and every 5 s its ticks, draws and audio.
+
 ## Author
 
 Claude, directed by Michael Steil &lt;mist64@mac.com&gt;.

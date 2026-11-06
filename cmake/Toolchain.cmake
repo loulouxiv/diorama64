@@ -1,14 +1,18 @@
-# SM64AR_LINUX: a Linux host build (libraries for now; the headless and Vulkan harnesses come later). No Xcode involved.
+# SM64AR_LINUX: a Linux host build (libraries, headless and windowed harnesses). SM64AR_ANDROID: the Quest app (the NDK's
+# toolchain file; Gradle builds it, apps/quest). Neither involves Xcode.
 if(NOT APPLE)
   set(SM64AR_VISIONOS OFF)
+  set(SM64AR_LINUX OFF)
+  set(SM64AR_ANDROID OFF)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(SM64AR_LINUX ON)
-  else()
-    set(SM64AR_LINUX OFF)
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(SM64AR_ANDROID ON)
   endif()
   return()
 endif()
 set(SM64AR_LINUX OFF)
+set(SM64AR_ANDROID OFF)
 if(NOT "$ENV{DEVELOPER_DIR}" STREQUAL "")
   set(SM64AR_DEVELOPER_DIR "$ENV{DEVELOPER_DIR}")
 else()

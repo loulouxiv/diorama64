@@ -30,6 +30,12 @@ elseif(NOT APPLE)
   set(SM64_PLATFORM_DEFINES "")
   find_package(Threads REQUIRED)
   set(SM64_PLATFORM_LIBS z Threads::Threads ${CMAKE_DL_LIBS} m)
+  if(SM64AR_ANDROID)
+    # mod audio is unused in AR: miniaudio keeps only its null backend (no AAudio/OpenSL ES device code); logs go to logcat
+    set_source_files_properties(${SM64_SRC_DIR}/src/pc/utils/miniaudio.c PROPERTIES COMPILE_DEFINITIONS
+      "MA_ENABLE_ONLY_SPECIFIC_BACKENDS;MA_ENABLE_NULL")
+    list(APPEND SM64_PLATFORM_LIBS log)
+  endif()
   set(SM64_ADAPTER_EXTRA adapter/src/link_stubs_visionos.c)
   # OSX_BUILD selects macOS paths (resources in ../Resources, Mach-O specifics); off everywhere but desktop macOS.
   list(REMOVE_ITEM SM64_DEFINES OSX_BUILD=1)

@@ -1,4 +1,4 @@
-// apps/linux_common — what the Linux harnesses (headless and windowed) share: the SM64 game setup, the same order and
+// apps/common — what the hosts without Apple frameworks (Linux harnesses, Quest app) share: the SM64 game setup, the same order and
 // meaning as apps/macos_harness's apply_setup.
 #pragma once
 #include <string>

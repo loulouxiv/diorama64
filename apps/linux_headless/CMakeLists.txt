@@ -1,5 +1,5 @@
-add_executable(sm64ar_headless main.cpp ../linux_common/sm64_launch.cpp)
-target_include_directories(sm64ar_headless PRIVATE ../linux_common)
+add_executable(sm64ar_headless main.cpp ../common/sm64_launch.cpp)
+target_include_directories(sm64ar_headless PRIVATE ../common)
 target_link_libraries(sm64ar_headless PRIVATE ar_headless ar_render_null sm64_adapter)
 if(SM64AR_HAVE_VULKAN)
   target_link_libraries(sm64ar_headless PRIVATE ar_render_vulkan)

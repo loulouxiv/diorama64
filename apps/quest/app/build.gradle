@@ -1,0 +1,90 @@
+// The APK: libdiorama64.so (the repository's root CMakeLists.txt, built by the NDK), the OpenXR loader, and the game's
+// resources (lang/, mods/, palettes/, dynos/ from the upstream desktop build) as assets. No Nintendo data: the ROM is
+// pushed to the headset separately (scripts/quest_install.py).
+plugins {
+    id 'com.android.application'
+}
+
+def repoRoot = rootProject.file('../..')
+def gameRes = new File(repoRoot, 'build/_src/sm64/build/us_pc')
+def stagedRes = layout.buildDirectory.dir('gameAssets')
+
+android {
+    namespace 'diorama64.quest'
+    compileSdk 34
+    ndkVersion '27.3.13750724'
+
+    defaultConfig {
+        applicationId 'diorama64.quest'
+        minSdk 29
+        targetSdk 32          // Meta Horizon OS: apps target API 32
+        versionCode 3
+        versionName '0.3-phase3'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                // c++_shared: the OpenXR loader's prefab package is built against it
+                arguments '-DANDROID_STL=c++_shared'
+                targets 'diorama64'
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path new File(repoRoot, 'CMakeLists.txt')
+            version '3.28.3'
+            buildStagingDirectory new File(repoRoot, 'build/quest-cxx')
+        }
+    }
+    buildFeatures {
+        prefab true
+    }
+    sourceSets {
+        main {
+            assets.srcDirs += [stagedRes]
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            // sideload only: signed with the debug key unless the caller configures another one
+            signingConfig signingConfigs.debug
+        }
+    }
+    lint {
+        checkReleaseBuilds false   // no Java or Kotlin code to check (a NativeActivity)
+    }
+    packagingOptions {
+        jniLibs { useLegacyPackaging false }
+    }
+}
+
+dependencies {
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.54'
+}
+
+// assets/res: the game's resource folders and an index ("SIZE PATH" per file) the app copies them by.
+def stageGameResources = tasks.register('stageGameResources') {
+    def dirs = ['lang', 'mods', 'palettes', 'dynos']
+    dirs.each { d -> inputs.dir(new File(gameRes, d)).optional(true) }
+    outputs.dir(stagedRes)
+    doLast {
+        dirs.each { d ->
+            if (!new File(gameRes, d).isDirectory())
+                throw new GradleException("Missing ${gameRes}/${d}: run python3 scripts/quest_build.py (it builds the game's resources first)")
+        }
+        def out = stagedRes.get().dir('res').asFile
+        project.delete(out)
+        project.copy {
+            from(gameRes) { dirs.each { d -> include "${d}/**" } }
+            into out
+        }
+        def lines = []
+        out.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+            lines << "${f.length()} ${out.toPath().relativize(f.toPath()).toString().replace('\\', '/')}"
+        }
+        lines.sort()
+        new File(out, 'index.txt').text = lines.join('\n') + '\n'
+    }
+}
+preBuild.dependsOn stageGameResources

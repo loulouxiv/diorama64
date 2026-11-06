@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sm64ar <sm64ar@localhost>
+Date: Thu, 5 Nov 2026 12:00:00 +0100
+Subject: [PATCH] Build with the Android NDK
+
+For the Quest port. bionic declares bcopy/bzero (as macros) like
+macOS's libc, so os_libc.h takes them from <strings.h> there too;
+bionic has no pthread_cancel, so stop_thread (which nothing calls)
+returns ENOSYS on Android; controller_bind_mapping.c includes the
+<string.h> it uses (glibc pulled it in through other headers).
+---
+ include/PR/os_libc.h                        | 4 ++--
+ src/pc/controller/controller_bind_mapping.c | 1 +
+ src/pc/thread.c                             | 5 +++++
+ 3 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/include/PR/os_libc.h b/include/PR/os_libc.h
+index 9eb872e..55f122e 100644
+--- a/include/PR/os_libc.h
++++ b/include/PR/os_libc.h
+@@ -5,9 +5,9 @@
+ 
+ // old bstring functions that aren't present on some platforms
+ 
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__ANDROID__)
+ 
+-// macOS libc has them
++// macOS libc and Android's bionic have them
+ #include <strings.h>
+ 
+ #elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200809L) || defined(NO_BZERO_BCOPY)
+diff --git a/src/pc/controller/controller_bind_mapping.c b/src/pc/controller/controller_bind_mapping.c
+index 513cd97..069c9fd 100644
+--- a/src/pc/controller/controller_bind_mapping.c
++++ b/src/pc/controller/controller_bind_mapping.c
+@@ -1,4 +1,5 @@
+ #include <stdio.h>
++#include <string.h>
+ #include <SDL2/SDL.h>
+ 
+ #include "controller_bind_mapping.h"
+diff --git a/src/pc/thread.c b/src/pc/thread.c
+index 8c077c3..787edb9 100644
+--- a/src/pc/thread.c
++++ b/src/pc/thread.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "thread.h"
+ 
+ #include <assert.h>
+@@ -88,7 +89,11 @@ int stop_thread(struct ThreadHandle *handle) {
+     handle->state = STOPPED;
+ 
+     // Stop and or cancel the execution of the thread in question.
++#ifdef __ANDROID__
++    return ENOSYS;   // bionic has no pthread_cancel (and nothing calls this)
++#else
+     return pthread_cancel(handle->thread);
++#endif
+ }
+ 
+ // Optimally just call init_thread_handle instead.

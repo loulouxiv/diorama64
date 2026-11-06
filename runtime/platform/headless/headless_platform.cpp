@@ -81,5 +81,10 @@ int HeadlessPlatform::get_pad(void *u, uint32_t player, ar_pad *out) {
     *out = p->pad_;
     return p->pad_connected_ ? 1 : 0;
 }
-ar_session_state HeadlessPlatform::state(void *) { return AR_SESSION_FOCUSED; }
+ar_session_state HeadlessPlatform::state(void *u) {
+    auto *p = static_cast<HeadlessPlatform *>(u);
+    std::lock_guard<std::mutex> g(p->m_);
+    return p->state_;
+}
+void HeadlessPlatform::set_session_state(ar_session_state s) { std::lock_guard<std::mutex> g(m_); state_ = s; }
 }
